@@ -1,0 +1,19 @@
+{
+  "name": "runaway-train",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "build": "tsc",
+    "pregenerate": "npm run build",
+    "generate": "node dist/generate.mjs output",
+    "prestory": "npm run build",
+    "story": "node dist/story-compiler.mjs output/diagrams.md"
+  },
+  "author": "me@wskb.ca",
+  "license": "BSD-3-Clause",
+  "description": "",
+  "devDependencies": {
+    "@types/node": "^26.0.1",
+    "typescript": "^6.0.3"
+  }
+}
