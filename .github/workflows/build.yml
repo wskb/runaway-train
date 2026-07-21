@@ -23,6 +23,7 @@ jobs:
           path: dist
       - run: |
           cd src
+          npm ci
           DEST="$PWD/../dist" npm run generate
           cd ..
       - run: |
