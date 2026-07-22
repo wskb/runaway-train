@@ -25,22 +25,23 @@ const storyAdvancements = [
 
 interface Command {
     readonly phrases: readonly Phrase[];
-    readonly strict?: true;
 }
+
+type Action = string | number | typeof increment;
 
 const increment: unique symbol = Symbol("increment");
 
 interface Response {
-    readonly command: Command;
+    readonly command: CommandName;
     readonly preConditions?: Partial<Record<WorldState, string | number | string[] | number[]>>;
-    readonly postConditions?: Partial<Record<WorldState, string | number | typeof increment>>;
+    readonly postConditions?: Partial<Record<WorldState, Action>>;
     readonly message: readonly string[];
     readonly exitMessage?: readonly string[];
 }
 
 interface Transition {
     readonly preConditions?: Partial<Record<WorldState, string | number | string[] | number[]>> & Record<"actionCount", number | number[]>;
-    readonly postConditions?: Partial<Record<WorldState, string | number | typeof increment>>;
+    readonly postConditions?: Partial<Record<WorldState, Action>>;
     readonly message: readonly string[],
     readonly exitMessage?: readonly string[];
 }
@@ -51,19 +52,28 @@ const concepts = {
 } as const;
 
 const commands = {
+    jumpOverride: {
+        phrases: [[concepts.jump, concepts.override]],
+    },
     jump: {
         phrases: [
             [concepts.jump],
-            [concepts.jump, ["out", "off"]],
             "tuck and roll",
         ],
-        strict: true
     },
-    jumpOverride: {
-        phrases: [concepts.jump, concepts.override],
-        strict: true
+    look: {
+        phrases: [
+            "look|examine|search"
+        ],
+    },
+    ledge: {
+        phrases: [
+            "ledge|door"
+        ],
     },
 } as const satisfies Record<string, Command>;
+type CommandName = keyof typeof commands;
+const commandNames = Object.keys(commands) as CommandName[];
 
 const welcome = [
     "You are in the conductor's booth of a",
@@ -79,7 +89,7 @@ const actionThresholds = {
 
 const activities: (Response|Transition)[] = [
     {
-        command: commands.jump,
+        command: "jump",
         preConditions: {
             phase: "slow",
             location: "ledge",
@@ -89,8 +99,8 @@ const activities: (Response|Transition)[] = [
         },
         message: [
             "You wait for a soft patch of grass and",
-            "and leap off the ledge, rolling once and",
-            "then standing up unharmed",
+            "and leap off the ledge, rolling once",
+            "and then standing up unharmed",
         ],
         exitMessage: [
             "You look up at the train going by, now",
@@ -123,27 +133,55 @@ const activities: (Response|Transition)[] = [
         message: [
             "You sway as the train picks up the pace",
             "The spedometer show a doubling of speed",
-            "The breeze blows through the open window",
+            "The wind blows through the open window",
         ],
     },
     {
-        command: commands.jump,
+        command: "ledge",
         preConditions: {
-            phase: ["fast", "space", "hyperspace", "ludicrous"],
+            phase: ["slow"],
+            location: "booth",
+        },
+        postConditions: {
             location: "ledge",
         },
         message: [
-            "You exit the booth onto the thin walkway",
-            "and jump off into the grassy field",
-            "rolling once and then standing unharmed",
+            "You exit the booth onto the thin ledge",
+            "that runs along the side of the engine.",
+            "The breeze blows your hair in your face",
         ],
-        exitMessage: [
-            "You look up at the train going by, now",
-            "without a conductor to control it. It",
-            "appears to pick up speed as you watch.",
+    },
+    {
+        command: "look",
+        preConditions: {
+            location: "booth",
+            windowClosed: 0,
+        },
+        postConditions: {
+            actionCount: increment,
+        },
+        message: [
+            "A sliding door gives access to a ledge",
+            "The hopper is behind you",
+            "The wind blows through the open window",
+        ],
+    },
+    {
+        command: "look",
+        preConditions: {
+            location: "booth",
+            windowClosed: 1,
+        },
+        postConditions: {
+            actionCount: increment,
+        },
+        message: [
+            "A sliding door gives access to a ledge",
+            "The hopper is behind you",
+            "There is a trap door in the floor",
         ],
     },
 ];
 
-export type { Response, Transition, WorldStateContent }
-export { activities, welcome, worldState, culturalReferences, storyAdvancements }
+export type { Action, CommandName, Response, Transition, WorldStateContent }
+export { activities, welcome, worldState, culturalReferences, storyAdvancements, increment, commands, commandNames }

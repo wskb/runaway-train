@@ -11,12 +11,23 @@ interface LabelReference {
     label: string;
 }
 
+interface JumpTableIndex {
+    isDefinition: false;
+    jumpTable: string;
+    label: string;
+}
+
+interface JumpTableDefinition {
+    isDefinition: true;
+    jumpTable: string;
+}
+
 interface LabelDefinition {
     definedLabel: string;
     isSubroutine: boolean;
 }
 
-type BasicLinePart = string | VariableReference | LineReference | LabelReference;
+type BasicLinePart = string | VariableReference | LineReference | LabelReference | JumpTableDefinition | JumpTableIndex;
 type BasicLine = BasicLinePart[];
 
 type BasicLineIngredient = BasicLinePart | LabelDefinition;
@@ -58,10 +69,13 @@ class VariableNamer {
         let coreName = info.name.toUpperCase();
         const replacePairs = [
             ["AT", "T"],
+            ["AND", "ND"],
             ["END", "ND"],
             ["ON", "N"],
             ["OR", "R"],
             ["GR", "G"],
+            ["INPUT", "INPT"],
+            ["LEN", "LN"],
             ["LET", "LT"],
             ["LOAD", "LOD"],
             ["MOD", "MD"],
@@ -106,6 +120,7 @@ class BasicProgramBuilder {
     private labels = new Map<string, number>();
     private variables = new Map<string, VariableInfo>();
     private program: BasicProgramIngredient = [];
+    private jumpTables = new Map<string, string[]>();
 
     private constructor() {}
 
@@ -137,6 +152,7 @@ class BasicProgramBuilder {
         for (const line of programLines) {
             const lineIndex = lines.length;
             lines.push(line.map(i => {
+                if (i === undefined) throw new Error(`undefined element in line: ${line}`);
                 if (typeof i != "string" && "definedLabel" in i) {
                     if (this.labels.has(i.definedLabel)) {
                         throw new Error(`The label ${i.definedLabel} has already been used`);
@@ -151,6 +167,18 @@ class BasicProgramBuilder {
         return lines;
     }
 
+    private resolveVariable(variable: string) {
+        const resolved = this.variables.get(variable);
+        if (resolved == undefined) throw new Error(`Unknown variable ${variable}`);
+        return resolved;
+    }
+
+    private resolveLabel(label: string) {
+        const resolved = this.labels.get(label);
+        if (resolved == undefined) throw new Error(`Unknown label ${label}`);
+        return resolved;
+    }
+
     output(): string {
         const lines = this.validateAndFlatten(this.program);
         const indexToLine = (i: number) => (i + 1)*10;
@@ -162,10 +190,21 @@ class BasicProgramBuilder {
             for (let part of line) {
                 if (typeof part == "string") {
                     output += part;
+                } else if ("isDefinition" in part) {
+                    const jumpTable = this.jumpTables.get(part.jumpTable);
+                    if (jumpTable == undefined) throw new Error(`Unknown jump table ${part.jumpTable}`);
+                    if (part.isDefinition) {
+                        const variableName = variableNamer.getName(this.resolveVariable(part.jumpTable))
+                        output += `ON ${variableName} GOTO ${jumpTable.map(l => indexToLine(this.resolveLabel(l))).join(", ")}`
+                    } else {
+                        const labelIndex = jumpTable.indexOf(part.label);
+                        if (labelIndex < 0) throw new Error(`Unknown label ${part.label} in ${part.jumpTable}`);
+                        output += `${labelIndex + 1}`;
+                    }
                 } else if ("variable" in part) {
-                    output += variableNamer.getName(this.variables.get(part.variable)!);
+                    output += variableNamer.getName(this.resolveVariable(part.variable));
                 } else if ("label" in part) {
-                    output += indexToLine(this.labels.get(part.label)!);
+                    output += indexToLine(this.resolveLabel(part.label));
                 } else {
                     output += indexToLine(part.lineOffset + i + 1);
                 }
@@ -179,9 +218,8 @@ class BasicProgramBuilder {
         const blockContent = this.flatten(body);
         return [
             ["IF ", ...(typeof test == "string" ? [test] : test), " GOTO ", this.lineRef(1)],
-            ["GOTO ", this.lineRef(blockContent.length + 1)],
+            ["GOTO ", this.lineRef(blockContent.length)],
             ...blockContent,
-            ["REM END IF"],
         ];
     }
     
@@ -189,10 +227,9 @@ class BasicProgramBuilder {
         const ifBlockContent = this.flatten(ifBody);
         const elseBlockContent = this.flatten(elseBody);
         return [
-            ["IF ", ...(typeof test == "string" ? [test] : test), " GOTO ", this.lineRef(elseBlockContent.length + 3)],
-            ["REM ELSE FIRST"],
+            ["IF ", ...(typeof test == "string" ? [test] : test), " GOTO ", this.lineRef(elseBlockContent.length + 1)],
             ...elseBlockContent,
-            ["GOTO ", this.lineRef(ifBlockContent.length + 1)],
+            ["GOTO ", this.lineRef(ifBlockContent.length)],
             ...ifBlockContent,
         ];
     }
@@ -241,11 +278,12 @@ class BasicProgramBuilder {
     }
 
     declareAndInitializeArray(name: string, data: number[]): BasicProgramIngredient {
+        this.recordVariable(name, "intarray");
         const dimensions = [data.length];
         return [
-            [`DIM ${name}%(${data.length})`],
+            [this.t`DIM ${name}(${data.length})`],
             this.makeFor("load", "0", `${dimensions[0]! - 1}`, [
-                [`READ ${name}%(`, this.v("load"), ")"]
+                [this.t`READ ${name}(${"load"})`]
             ]),
             this.asData(data),
         ];
@@ -367,6 +405,22 @@ class BasicProgramBuilder {
 
     t(strings: TemplateStringsArray, ...args: (number | BasicLineIngredient | BasicLineIngredient[])[]): BasicLineIngredient[] {
         return this.template(strings, ...args);
+    }
+
+    setJump(jumpTable: string, label: string): BasicLineIngredient[] {
+        let jumpTableLabels = this.jumpTables.get(jumpTable);
+        if (jumpTableLabels == undefined) {
+            jumpTableLabels = [];
+            this.jumpTables.set(jumpTable, jumpTableLabels);
+        }
+        if (jumpTableLabels.indexOf(label) < 0) {
+            jumpTableLabels.push(label);
+        }
+        return [this.vi(jumpTable), " = ", { isDefinition: false, jumpTable, label }];
+    }
+
+    jumpTable(jumpTable: string): BasicLineIngredient[] {
+        return [{ isDefinition: true, jumpTable }];
     }
 }
 

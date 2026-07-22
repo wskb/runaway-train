@@ -1,7 +1,7 @@
 import { writeFile } from "node:fs/promises";
 import { BasicProgramBuilder, type BasicProgramIngredient } from "./basic.mjs";
-import { processedWorld } from "./story-compiler.mjs";
-import { welcome } from "./story.mjs";
+import { diagramMarkdownContent, processedWorld, type UnresolvedCommandNode, type UnresolvedConceptNode } from "./story-compiler.mjs";
+import { activities, commandNames, increment, welcome, type Action, type WorldStateContent } from "./story.mjs";
 import path from "node:path";
 
 /*
@@ -64,7 +64,7 @@ function fineTrainProgram() {
             [b.vi("renderOffset"), " = ", b.vi("renderCycle"), " - 16 * INT(", b.vi("renderCycle"), " / 16)"],
             ["IF ", b.v("fullRender"), " = 0 THEN ", b.vi("renderline"), " = ", b.vi("renderOffset"), " + 7 - 8 * INT((", b.vi("renderOffset"), " + 7) / 8)"],
             ["IF ", b.v("fullRender"), " = 1 THEN ", b.vi("renderline"), " = 0"],
-            [b.declareLabel("renderloop")],
+            [b.declareLabel("render_track_loop")],
             [b.vi("tine"), " = 0"],
             ["IF (", b.v("renderline"), " + 16 - ", b.vi("renderOffset"), ") - 16 * INT((", b.v("renderline"), " + 16 -", b.vi("renderOffset"), ") / 16) < 8 THEN ", b.vi("tine"), " = 1"],
             [
@@ -137,7 +137,7 @@ function fineTrainProgram() {
             ["IF ", b.v("fullRender"), " = 0 THEN ", b.vi("renderline"), " = ", b.vi("renderline"), " + 8"],
             ["IF ", b.v("fullRender"), " = 1 THEN ", b.vi("renderline"), " = ", b.vi("renderline"), " + 1"],
             ["IF ", b.vi("renderline"), " > 79 THEN GOTO ", b.lineRef(1)],
-            [b.gotoLabel("renderloop")],
+            [b.gotoLabel("render_track_loop")],
         ]),
         ["HGR"], // clear screen #1
         [b.vi("fullRender"), " = 1"],
@@ -157,24 +157,213 @@ function fullProgram() {
     b.add(
         ["DIM ", b.variableReference("worldState", "intarray"), `(${world.worldStateIndicies.size - 1})`],
         ["DIM ", b.variableReference("readBuffer", "intarray"), "(39)"],
+        ["DIM ", b.variableReference("matchedConcepts", "intarray"), "(9)"],
         b.makeSubroutine("RESET", [
             b.makeFor("loop", "0", "39", [b.t`${"readBuffer"}(${"loop"}) = 0`]),
             b.makeFor("loop", "0", `${world.worldStateIndicies.size - 1}`, [b.t`${"worldState"}(${"loop"}) = 0`]),
             [b.vi("readMode"), " = 1"],
             [b.vi("renderScene"), " = 0"],
             [b.vi("nextAction"), " = 0"],
+            [b.vi("command"), " = -1"],
         ]),
     );
 
-    const continuations: string[] = ["transition_welcome"];
-    b.add(
-        [b.declareLabel("transition_welcome")],
-        ...welcome.map(m => [`PRINT "${m}"`]),
-        b.t`GOTO ${b.labelRef("endAction")}`
-    );
-    for (const transition of world.transitions) {
-        //program.push(b => []);
+    const conceptsArray: number[] = [];
+    {
+        let nextOffset = 0;
+        const nodeOffsets = new Map<number, number>();
+        const uncountedNodes = [world.conceptsGraphRoot];
+        const unprocessedNodes: UnresolvedConceptNode[] = [];
+        while (uncountedNodes.length) {
+            const conceptNode = uncountedNodes.shift()!;
+            nodeOffsets.set(conceptNode.id, nextOffset);
+            nextOffset += conceptNode.edges.length * 2 + 1;
+            unprocessedNodes.push(conceptNode);
+            uncountedNodes.push(...conceptNode.edges.map(e => e.target).filter(n => !n.resolved));
+        }
+        while (unprocessedNodes.length) {
+            const conceptNode = unprocessedNodes.shift()!;
+            const offset = nodeOffsets.get(conceptNode.id)!;
+            while (conceptsArray.length < offset + conceptNode.edges.length * 2 + 1) {
+                conceptsArray.push(0);
+            }
+            for (let i = 0; i < conceptNode.edges.length; i++) {
+                const edge = conceptNode.edges[i]!;
+                conceptsArray[offset + i*2] = edge.letter == " " ? -1 : edge.letter.toUpperCase().charCodeAt(0);
+                conceptsArray[offset + i*2 + 1] = edge.target.resolved ? edge.target.id : -nodeOffsets.get(edge.target.id)!;
+            }
+        }
     }
+    b.add(b.declareAndInitializeArray("CONCEPTS", conceptsArray));
+
+    const commandsArray: number[] = [];
+    {
+        let nextOffset = 0;
+        const nodeOffsets = new Map<number, number>();
+        const uncountedNodes = [world.commandGraphRoot];
+        const unprocessedNodes: UnresolvedCommandNode[] = [];
+        while (uncountedNodes.length) {
+            const commandNode = uncountedNodes.shift()!;
+            nodeOffsets.set(commandNode.id, nextOffset);
+            nextOffset += commandNode.edges.length * 2 + 1;
+            unprocessedNodes.push(commandNode);
+            uncountedNodes.push(...commandNode.edges.map(e => e.target).filter(n => !n.resolved));
+        }
+        while (unprocessedNodes.length) {
+            const commandNode = unprocessedNodes.shift()!;
+            const offset = nodeOffsets.get(commandNode.id)!;
+            while (commandsArray.length < offset + commandNode.edges.length * 2 + 1) {
+                commandsArray.push(0);
+            }
+            for (let i = 0; i < commandNode.edges.length; i++) {
+                const edge = commandNode.edges[i]!;
+                commandsArray[offset + i*2] = edge.concept;
+                commandsArray[offset + i*2 + 1] = edge.target.resolved ? edge.target.id : -nodeOffsets.get(edge.target.id)!;
+            }
+        }
+    }
+    b.add(b.declareAndInitializeArray("CMDS", commandsArray));
+    b.add(b.gotoLabel("START"));
+
+    const responseTests: BasicProgramIngredient = [];
+    const transitionTests: BasicProgramIngredient = [];
+    const activityActions: BasicProgramIngredient = [];
+    const activityExits: BasicProgramIngredient = [];
+
+    activityActions.push(
+        [b.declareLabel("transition_welcome")],
+        b.t`${"worldState"}(0) = 1`,
+        b.setJump("nextAction", `transition_welcome_message`),
+        b.t`GOTO ${b.labelRef("endAction")}`,
+    );
+    activityExits.push(
+        [b.declareLabel("transition_welcome_message")],
+        ...welcome.map(m => [`PRINT "${m}"`]),
+        [b.vi("readMode"), " = 0"],
+        b.t`${"nextAction"} = 0`,
+        b.t`GOTO ${b.labelRef("endAction")}`,
+    );
+
+    for (let i = 0; i < activities.length; i++) {
+        const activity = activities[i]!;
+        activityActions.push(
+            [b.declareLabel(`activity_action_${i}`)],
+            ...activity.message.map(m => [`PRINT "${m}"`]),
+        );
+        
+        const activityTest = "command" in activity ?
+            b.t`IF ${"command"} = ${commandNames.indexOf(activity.command)} AND ` :
+            b.t`IF `;
+        let firstPrecondition = true;
+        const preConditions = (activity.preConditions ?? {}) as any;
+        for (const preCondition in preConditions) {
+            const stateIndex = world.worldStateIndicies.get(preCondition)!;
+            const test = preConditions[preCondition] as string | number | string[] | number[];
+            if (firstPrecondition) {
+                firstPrecondition = false;
+            } else {
+                activityTest.push(" AND ");
+            }
+            if (Array.isArray(test)) {
+                activityTest.push("(");
+                for (let i = 0; i < test.length; i++) {
+                    if (i > 0) activityTest.push(" OR ");
+                    const value = test[i]!;
+                    let numberValue: number;
+                    if (typeof value == "string") {
+                        const preConditionValues = world.worldStateValues.get(preCondition);
+                        if (preConditionValues == undefined) throw new Error(`state value not known ${preCondition}`);
+                        const preConditionValue = preConditionValues.get(value);
+                        if (preConditionValue == undefined) throw new Error(`state value not known ${preCondition} for value ${value}`);
+                        numberValue = preConditionValue;
+                    } else {
+                        numberValue = value;
+                    }
+                    activityTest.push(...b.t`${"worldState"}(${stateIndex}) = ${numberValue}`);
+                }
+                activityTest.push(")");
+            }
+            else
+            {
+                let numberValue: number;
+                if (typeof test == "string") {
+                    const preConditionValues = world.worldStateValues.get(preCondition);
+                    if (preConditionValues == undefined) throw new Error(`state value not known ${preCondition}`);
+                    const preConditionValue = preConditionValues.get(test);
+                    if (preConditionValue == undefined) throw new Error(`state value not known ${preCondition} for value ${test}`);
+                    numberValue = preConditionValue;
+                } else {
+                    numberValue = test;
+                }
+                activityTest.push(...b.t`${"worldState"}(${stateIndex}) = ${numberValue}`);
+            }
+        }
+        activityTest.push(...b.t` THEN ${b.setJump("nextAction", `activity_action_${i}`)} : GOTO ${b.labelRef("command" in activity ? "response_test_end" : "transition_test_end")}`);
+        if ("command" in activity) {
+            responseTests.push(activityTest);
+        } else {
+            transitionTests.push(activityTest);
+        }
+
+        let actionCountChanged = false;
+        for (const postCondition in activity.postConditions) {
+            if (postCondition == "actionCount") {
+                actionCountChanged = true;
+            }
+            const stateIndex = world.worldStateIndicies.get(postCondition)!;
+            const action = (activity.postConditions as any)[postCondition] as Action;
+            if (action == increment) {
+                activityActions.push( b.t`${"worldState"}(${stateIndex}) = 1 + ${"worldState"}(${stateIndex})` );
+            } else if (typeof action == "number") {
+                activityActions.push( b.t`${"worldState"}(${stateIndex}) = ${action}` );
+            } else {
+                const value = world.worldStateValues.get(postCondition)!.get(action)!;
+                activityActions.push( b.t`${"worldState"}(${stateIndex}) = ${value}` );
+            }
+        }
+        if (actionCountChanged) {
+            activityActions.push(
+                b.callSubroutine("transition_test"),
+                b.t`GOTO ${b.labelRef("endAction")}`
+            );
+        } else if (activity.exitMessage != undefined) {
+            activityExits.push(
+                [b.declareLabel(`response_exit_${i}`)],
+                ...activity.exitMessage.map(m => [`PRINT "${m}"`]),
+                [b.vi("readMode"), " = 1"],
+                b.setJump("nextAction", "completion"),
+                b.t`GOTO ${b.labelRef("endAction")}`
+            );
+            activityActions.push(
+                [b.vi("readMode"), " = 1"],
+                b.t`${"worldState"}(0) = 4`,
+                b.setJump("nextAction", `response_exit_${i}`),
+                b.t`GOTO ${b.labelRef("endAction")}`
+            );
+        } else {
+            activityActions.push(
+                [b.vi("readMode"), " = 0"],
+                b.t`${"nextAction"} = 0`,
+                b.t`GOTO ${b.labelRef("endAction")}`
+            );
+        }
+    }
+    b.add(
+        b.makeSubroutine("response_test", [
+            ...responseTests,
+            b.t`PRINT "Right here and now, you can't do that"`,
+            [b.declareLabel("response_test_end")]
+        ])
+    );
+    b.add(
+        b.makeSubroutine("transition_test", [
+            ...transitionTests,
+            b.t`${"nextAction"} = 0`,
+            [b.declareLabel("transition_test_end")]
+        ])
+    );
+    b.add(...activityActions);
+    b.add(...activityExits);
 
     b.add(
         b.makeSubroutine("PROMPT", [
@@ -182,15 +371,73 @@ function fullProgram() {
             b.t`IF ${"readMode"} = 1 THEN INVERSE : PRINT "ENTER TO CONTINUE>"; : NORMAL`,
         ]),
         b.makeSubroutine("PROCESSACTION", [
-            b.makeIfElse(b.t`IF ${"readMode"} = 1`, [
-                b.t`${"readBuffer"}(0) = 0`,
-                b.t`GOTO ${"nextAction"}`,
-            ], [
-                [`REM TODO`]
-            ]),
+            b.t`IF ${"nextAction"} = 0 GOTO ${b.labelRef("endAction")}`,
+            b.jumpTable("nextAction"),
             [b.declareLabel("endAction")],
-            b.callSubroutine("PROMPT"),
-            [`RETURN`],
+            [...b.t`IF ${"nextAction"} = 0 THEN `, ...b.callSubroutine("PROMPT")],
+        ]),
+        b.makeSubroutine("PROCESSBUFFER", [
+            b.makeIf(b.t`${"readMode"} = 0`, [
+                b.t`${b.vi("command")} = -1`,
+                b.makeFor("loop", "0", "9", [b.t`${"matchedConcepts"}(${"loop"}) = 0`]),
+                b.t`${b.vi("inputIndex")} = 1`,
+                [b.declareLabel("next_word")],
+                b.t`${b.vi("parseIndex")} = 0`,
+                [b.declareLabel("next_word_item")],
+                b.t`${b.vi("searchItem")} = -1`,
+                b.t`IF -${"inputIndex"} > ${"readBuffer"}(0) AND ${"readBuffer"}(${"inputIndex"}) <> 20 THEN ${"searchItem"} = ${"readBuffer"}(${"inputIndex"})`,
+                b.makeIfElse(b.t`${"CONCEPTS"}(${"parseIndex"}) = ${"searchItem"}`, [
+                    b.makeIfElse(b.t`${"CONCEPTS"}(${"parseIndex"} + 1) < 0`, [
+                        b.t`${"parseIndex"} = -${"CONCEPTS"}(${"parseIndex"} + 1)`,
+                        b.t`${"inputIndex"} = 1 + ${"inputIndex"}`,
+                        b.gotoLabel("next_word_item"),
+                    ], [
+                        b.t`${"matchedConcepts"}(0) = 1 + ${"matchedConcepts"}(0)`,
+                        b.t`${b.vi("matchedConcept")} = ${"CONCEPTS"}(${"parseIndex"} + 1)`,
+                        b.t`${b.vi("matchedConceptIndex")} = 1`,
+                        b.t`IF ${"matchedConcepts"}(${"matchedConceptIndex"}) = 0 THEN ${"matchedConcepts"}(${"matchedConceptIndex"}) = ${"matchedConcept"} : GOTO ${b.lineRef(3)}`,
+                        b.t`IF ${"matchedConcepts"}(${"matchedConceptIndex"}) < ${"matchedConcept"} THEN ${"matchedConceptIndex"} = ${"matchedConceptIndex"} + 1 : GOTO ${b.lineRef(-1)}`,
+                        b.t`IF ${"matchedConcepts"}(${"matchedConceptIndex"}) > ${"matchedConcept"} THEN ${b.vi("swap")} = ${"matchedConcept"} : ${"matchedConcept"} = ${"matchedConcepts"}(${"matchedConceptIndex"}) : ${"matchedConcepts"}(${"matchedConceptIndex"}) = ${"swap"} : GOTO ${b.lineRef(-2)}`,
+                        b.gotoLabel("next_word"),
+                    ]),
+                ], [
+                    b.makeIfElse(b.t`${"CONCEPTS"}(${"parseIndex"}) = 0`, [
+                        b.t`REM CONSUME WORD`,
+                        b.t`IF -${"inputIndex"} > ${"readBuffer"}(0) AND ${"readBuffer"}(${"inputIndex"}) <> 20 THEN ${"inputIndex"} = ${"inputIndex"} + 1 : GOTO ${b.lineRef(-1)}`,
+                        b.t`IF -${"inputIndex"} =< ${"readBuffer"}(0) THEN GOTO ${b.lineRef(2)}`,
+                        b.t`${"inputIndex"} = ${"inputIndex"} + 1`,
+                        b.gotoLabel("next_word"),
+                    ], [
+                        b.t`${"parseIndex"} = 2 + ${"parseIndex"}`,
+                        b.gotoLabel("next_word_item"),
+                    ]),
+                ]),
+                b.makeIf(b.t`${"matchedConcepts"}(0) > 0`, [
+                    b.t`${b.vi("inputIndex")} = 1`,
+                    b.t`${b.vi("parseIndex")} = 0`,
+                    [b.declareLabel("next_concept_parse")],
+                    b.t`${b.vi("searchItem")} = -1`,
+                    b.t`IF ${"inputIndex"} <= ${"matchedConcepts"}(0) THEN ${"searchItem"} = ${"matchedConcepts"}(${"inputIndex"})`,
+                    [b.declareLabel("next_concept_item")],
+                    b.makeIfElse(b.t`${"CMDS"}(${"parseIndex"}) = ${"searchItem"}`, [
+                        b.makeIfElse(b.t`${"CMDS"}(${"parseIndex"} + 1) < 0`, [
+                            b.t`${"parseIndex"} = -${"CMDS"}(${"parseIndex"} + 1)`,
+                            b.t`${"inputIndex"} = 1 + ${"inputIndex"}`,
+                            b.gotoLabel("next_concept_parse"),
+                        ], [
+                            b.t`${"command"} = ${"CMDS"}(${"parseIndex"} + 1)`,
+                        ]),
+                    ], [
+                        b.t`IF ${"CMDS"}(${"parseIndex"}) = 0 THEN GOTO ${b.lineRef(2)}`,
+                        b.t`${"parseIndex"} = 2 + ${"parseIndex"}`,
+                        b.gotoLabel("next_concept_item"),
+                    ]),
+                ]),
+                b.t`IF ${"command"} > -1 THEN GOSUB ${b.subroutineRef("response_test")}`,
+                b.t`IF ${"command"} = -1 THEN PRINT "I'm sorry, I didn't understand that"`,
+            ]),
+            b.t`${"readBuffer"}(0) = 0`,
+            b.callSubroutine("PROCESSACTION")
         ]),
         b.makeSubroutine("PROCESSINPUT", [
             [b.vi("readChar"), " = PEEK (-16384)"],
@@ -198,11 +445,11 @@ function fullProgram() {
             b.makeIf(b.t`${"readChar"} > 128`, [
                 b.t`${"readChar"} = ${"readChar"} - 128`,
                 b.makeIfElse(b.t`${"readMode"} = 1`, [
-                    b.t`IF ${"readChar"} <> 10 THEN PRINT CHR$(9);`,
-                    b.t`IF ${"readChar"} = 10 THEN ${"readBuffer"}(0) = -1`,
+                    b.t`IF NOT (${"readChar"} = 10 OR ${"readChar"} = 13) THEN PRINT CHR$(9);`,
+                    b.t`IF ${"readChar"} = 10 OR ${"readChar"} = 13 THEN ${"readBuffer"}(0) = -1`,
                 ], [
                     b.makeIfElse(b.t`${"readChar"} = 127`, [
-                        b.makeIf(b.t`${"readBuffer"}(0) > 1`, [
+                        b.makeIf(b.t`${"readBuffer"}(0) > 0`, [
                             b.t`HTAB ${"readBuffer"}(0) + 1`,
                             [`PRINT " ";`],
                             b.t`HTAB ${"readBuffer"}(0) + 1`,
@@ -211,14 +458,14 @@ function fullProgram() {
                     ], [
                         b.t`PRINT CHR$(${"readChar"});`,
                         b.t`IF ${"readChar"} >= 97 AND ${"readChar"} <= 122 THEN ${"readChar"} = ${"readChar"} - 32`,
-                        b.makeIf(b.t`${"readChar"} == 20 OR (${"readChar"} >= 65 AND ${"readChar"} <= 90)`, [
+                        b.makeIf(b.t`${"readChar"} = 20 OR (${"readChar"} >= 65 AND ${"readChar"} <= 90)`, [
                             b.t`${"readBuffer"}(0) = ${"readBuffer"}(0) + 1`,
                             b.t`${"readBuffer"}(${"readBuffer"}(0)) = ${"readChar"}`,
                         ]),
-                        b.t`IF ${"readChar"} = 10 THEN ${"readBuffer"}(0) = -1 - ${"readBuffer"}(0)`,
+                        b.t`IF ${"readChar"} = 10 OR ${"readChar"} = 13 THEN ${"readBuffer"}(0) = -1 - ${"readBuffer"}(0)`,
                     ]),
                 ]),
-                b.t`IF ${"readBuffer"}(0) < 0 THEN GOSUB ${b.sub("PROCESSACTION")}`,
+                b.t`IF ${"readBuffer"}(0) < 0 THEN GOSUB ${b.sub("PROCESSBUFFER")}`,
             ]),
         ]),
         b.makeSubroutine("RENDERSPACE", [
@@ -236,6 +483,7 @@ function fullProgram() {
             ["HPLOT ", b.vi("starRenderX"), ", ", ...b.mod([b.vi("starRenderYOffset")], "160")],
             ["IF ", ...b.mod([b.vi("starRenderCount")], "17"), " = 0 THEN HCOLOR = 7"],
             [b.vi("starRenderCount"), " = ", ...b.mod([b.vi("starRenderCount"), " + 1"], "32000")],
+            b.callSubroutine("PROCESSINPUT"),
             [b.gotoLabel("starRenderLoop")],
             [b.declareLabel("starRenderLoopExit")],
         ]),
@@ -245,7 +493,7 @@ function fullProgram() {
             [b.vi("yRenderOffset"), " = ", ...b.mod([b.vi("renderCycle")], "4")],
             ["IF ", b.vi("renderMode"), " = 0 THEN ", b.vi("renderline"), " = 0"],
             ["IF ", b.v("renderMode"), " <> 0 THEN ", b.vi("renderline"), " = ", ...b.mod([b.vi("yRenderOffset"), " + 1"], "2")],
-            [b.declareLabel("renderloop")],
+            [b.declareLabel("trackRenderLoop")],
             [b.vi("xRenderOffset"), " = 5 - INT(", b.vi("renderline"), " / 4)"],
             [b.vi("tine"), " = 0"],
             ["IF (", ...b.mod([b.v("renderline"), " + 4 - ", b.vi("yRenderOffset")], "4"), ") < 2 THEN ", b.vi("tine"), " = 1"],
@@ -261,12 +509,17 @@ function fullProgram() {
             ["IF ", b.v("renderMode"), " = 0 THEN ", b.vi("renderline"), " = ", b.vi("renderline"), " + 1"],
             ["IF ", b.v("renderMode"), " > 0 THEN ", b.vi("renderline"), " = ", b.vi("renderline"), " + 2"],
             [b.vi("wait"), " = 0"],
-            ["IF ", b.v("renderMode"), " = 1 THEN ", b.vi("wait"), " = 100"],
-            b.makeFor("waitLoop", "0", [b.v("wait")], [["REM WAITING"]]),
+            ["IF ", b.v("renderMode"), " = 1 THEN ", b.vi("wait"), " = 15"],
+            b.makeFor("waitLoop", "0", [b.v("wait")], [
+                b.callSubroutine("PROCESSINPUT"),
+            ]),
+            b.callSubroutine("PROCESSINPUT"),
             ["IF ", b.vi("renderline"), " > 19 THEN GOTO ", b.lineRef(1)],
-            [b.gotoLabel("renderloop")],
+            [b.gotoLabel("trackRenderLoop")],
         ]),
+        [b.declareLabel("START")],
         b.callSubroutine("RESET"),
+        ["TEXT : HOME"],
         [`PRINT "" : PRINT ""`],
         [`PRINT "               ____ OOoo"`],
         [`PRINT "               |DD|____T_"`],
@@ -276,40 +529,51 @@ function fullProgram() {
         [`PRINT "  An interactive multimedia experience"`],
         [`PRINT "" : PRINT ""`],
         b.callSubroutine("PROMPT"),
-        b.t`${"nextAction"} = ${b.subroutineRef("action_welcome")}`,
-        b.makeIf(b.t`${"renderScene"} = 0 AND ${"worldState"}(0) = 1`, [
-            ["GR"],
+        b.setJump("nextAction", "transition_welcome"),
+        [b.declareLabel("renderloop")],
+        b.makeIf(b.t`${"renderScene"} < 1 AND ${"worldState"}(0) = 1`, [
+            ["GR : PRINT"],
             [b.vi("renderMode"), " = 0"],
             [b.vi("renderScene"), " = 1"],
             [b.vi("renderCycle"), " = 0"],
             b.callSubroutine("RENDERTRACK"),
             b.t`${"renderMode"} = 1`,
+            b.callSubroutine("PROCESSACTION"),
         ]),
-        b.makeIf(b.t`${"renderScene"} = 1 AND ${"worldState"}(0) = 2`, [
+        b.makeIf(b.t`${"renderScene"} < 2 AND ${"worldState"}(0) = 2`, [
+            [b.vi("renderScene"), " = 2"],
             b.t`${"renderMode"} = 2`,
+            b.callSubroutine("PROCESSACTION"),
+        ]),
+        b.makeIf(b.t`${"renderScene"} < 3 AND ${"worldState"}(0) = 3`, [
+            ["HGR"],
+            [b.vi("renderScene"), " = 3"],
+            [b.vi("starRenderCount"), " = 0"],
+            b.callSubroutine("PROCESSACTION"),
+        ]),
+        b.makeIf(b.t`${"renderScene"} < 4 AND ${"worldState"}(0) = 4`, [
+            ["TEXT : HOME"],
+            [b.vi("renderScene"), " = 4"],
+            b.callSubroutine("PROCESSACTION"),
         ]),
         b.makeIf(b.t`${"renderScene"} = 1 OR ${"renderScene"} = 2`, [
             b.t`${"renderCycle"} = ${"renderCycle"} + 1`,
             b.t`IF ${"renderCycle"} >= 40 THEN ${"renderCycle"} = 0`,
             b.callSubroutine("RENDERTRACK"),
-            b.t`IF ${"renderScene"} <> ${"worldState"}(0) THEN GOTO ${b.lineRef(2)}`,
-            ["GOTO ", b.lineRef(-6)],
-        ]),
-        b.makeIf(b.t`${"renderScene"} = 2 AND ${"worldState"}(0) = 3`, [
-            ["HGR"],
-            b.t`${"renderMode"} = 3`,
-            [b.vi("starRenderCount"), " = 0"],
+            b.t`IF ${"renderScene"} <> ${"worldState"}(0) THEN GOTO ${b.labelRef("renderloop")}`,
+            ["GOTO ", b.lineRef(-4)],
         ]),
         b.makeIf(b.t`${"renderScene"} = 3`, [
             b.callSubroutine("RENDERSPACE"),
-            b.t`IF ${"renderScene"} <> ${"worldState"}(0) THEN GOTO ${b.lineRef(2)}`,
+            b.t`IF ${"renderScene"} <> ${"worldState"}(0) THEN GOTO ${b.labelRef("renderloop")}`,
             ["GOTO ", b.lineRef(-2)],
         ]),
         b.makeIf(b.t`${"renderScene"} = 0 OR ${"renderScene"} = 4`, [
             b.callSubroutine("PROCESSINPUT"),
-            b.t`IF ${"renderScene"} <> ${"worldState"}(0) THEN GOTO ${b.lineRef(2)}`,
+            b.t`IF ${"renderScene"} <> ${"worldState"}(0) THEN GOTO ${b.labelRef("renderloop")}`,
             ["GOTO ", b.lineRef(-2)],
-        ])
+        ]),
+        [b.declareLabel("completion")],
     );
     return b;
 }
@@ -346,3 +610,4 @@ const destFolder = process.env["DEST"] ?? process.argv[2]!;
 await writeFile(path.join(destFolder, "fineTrain.basic.txt"), fineTrainProgram().output(), { encoding: "utf-8" });
 await writeFile(path.join(destFolder, "whistleTest.basic.txt"), whistleTestProgram().output(), { encoding: "utf-8" });
 await writeFile(path.join(destFolder, "fullProgram.basic.txt"), fullProgram().output(), { encoding: "utf-8" });
+//await writeFile(path.join(destFolder, "diagrams.md"), diagramMarkdownContent(), { encoding: "utf-8" })
